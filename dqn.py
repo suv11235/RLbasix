@@ -6,6 +6,11 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from collections import deque
+import time
+
+# Monkey patch for numpy: define np.bool8 if it doesn't exist
+if not hasattr(np, 'bool8'):
+    np.bool8 = np.bool_
 
 # Define the Q-Network
 class DQN(nn.Module):
@@ -47,12 +52,15 @@ def dqn_training(env, num_episodes=500, batch_size=64, gamma=0.99,
             return int(torch.argmax(q_values, dim=1).item())
 
     for episode in range(num_episodes):
-        state = env.reset()
+        # New gym API: env.reset() returns (observation, info)
+        state, _ = env.reset()
         done = False
         total_reward = 0
         while not done:
             action = select_action(state)
-            next_state, reward, done, _ = env.step(action)
+            # New gym API: env.step() returns 5 values
+            next_state, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
             total_reward += reward
             replay_buffer.append((state, action, reward, next_state, done))
             state = next_state
@@ -60,10 +68,11 @@ def dqn_training(env, num_episodes=500, batch_size=64, gamma=0.99,
             if len(replay_buffer) >= batch_size:
                 batch = random.sample(replay_buffer, batch_size)
                 states, actions, rewards, next_states, dones = zip(*batch)
-                states = torch.FloatTensor(states).to(device)
+                # Convert lists to numpy arrays before creating tensors
+                states = torch.FloatTensor(np.array(states)).to(device)
                 actions = torch.LongTensor(actions).unsqueeze(1).to(device)
                 rewards = torch.FloatTensor(rewards).unsqueeze(1).to(device)
-                next_states = torch.FloatTensor(next_states).to(device)
+                next_states = torch.FloatTensor(np.array(next_states)).to(device)
                 dones = torch.FloatTensor(dones).unsqueeze(1).to(device)
 
                 current_q = policy_net(states).gather(1, actions)
@@ -83,6 +92,39 @@ def dqn_training(env, num_episodes=500, batch_size=64, gamma=0.99,
     return policy_net
 
 if __name__ == "__main__":
-    env = gym.make('CartPole-v1')
-    trained_policy = dqn_training(env)
+    # --- Training Phase ---
+    # Create a training environment that does not open a window (render_mode="rgb_array")
+    train_env = gym.make('CartPole-v1', render_mode="rgb_array")
+    trained_policy = dqn_training(train_env)
+    train_env.close()
 
+    # --- Inference / Visualization Phase ---
+    # Create a new environment for inference with a human-friendly render mode
+    infer_env = gym.make('CartPole-v1', render_mode="human")
+    print("\nStarting inference visualization. Close the window or stop the process to exit.")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Run a single inference episode
+    state, _ = infer_env.reset()
+    done = False
+    total_reward = 0
+    while not done:
+        infer_env.render()  # This will show the visualization window
+
+        # Select an action using the trained policy
+        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
+        with torch.no_grad():
+            q_values = trained_policy(state_tensor)
+        action = int(torch.argmax(q_values, dim=1).item())
+
+        # Step the environment using the new Gym API
+        next_state, reward, terminated, truncated, _ = infer_env.step(action)
+        done = terminated or truncated
+        total_reward += reward
+        state = next_state
+
+        # Slow down the visualization for clarity (optional)
+        time.sleep(0.05)
+
+    print(f"Inference episode completed. Total Reward: {total_reward:.2f}")
+    infer_env.close()
